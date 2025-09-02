@@ -1,4 +1,4 @@
-<!-- FILE: index.html (T_logger build v7) -->
+<!-- FILE: index.html (T_logger build v8) -->
 <!DOCTYPE html>
 <html lang="ja">
 <head>
@@ -46,7 +46,7 @@
 
 <script>
 'use strict';
-console.log('T_logger build v7');
+console.log('T_logger build v8');
 
 // --------- Chart.js 準備 ---------
 const ctx = document.getElementById('chart').getContext('2d');
@@ -184,28 +184,42 @@ async function disconnect() {
   log('# Disconnected');
 }
 
-// ---- ヘッダ行の堅牢パーサ ----
-function parseHeaderLine(line) {
-  // # SENSORS:<n>
-  const mCount = line.match(/^#\s*SENSORS\s*:\s*(\d+)/i);
-  if (mCount) {
-    const n = parseInt(mCount[1], 10) || 0;
-    sensorCount = n;
-    ensureDatasets(sensorCount);
-    chart.update();
-    return;
-  }
-  // # SENSOR<idx>:<rom>
-  const mSensor = line.match(/^#\s*SENSOR\s*?(\d+)\s*:\s*(.+)$/i);
-  if (mSensor) {
-    const idx = parseInt(mSensor[1], 10);
-    const rom = mSensor[2].trim();
-    if (!Number.isNaN(idx) && chart.data.datasets[idx]) {
-      chart.data.datasets[idx].label = `T${idx} (${rom})`;
+// ---- ヘッダ行の超防御型パーサ（落ちない版） ----
+function parseHeaderLine(raw) {
+  try {
+    // BOMや余計な制御文字を除去してから処理
+    const line = String(raw).replace(/\uFEFF/g, '').trim();
+
+    // # SENSORS : n
+    if (/^#\s*SENSORS\b/i.test(line)) {
+      const colon = line.indexOf(':');
+      const after = colon >= 0 ? line.slice(colon + 1).trim() : '';
+      const n = Number.parseInt(after, 10);
+      sensorCount = Number.isFinite(n) ? n : 0;
+      ensureDatasets(sensorCount);
+      chart.update();
+      return;
     }
-    return;
+
+    // # SENSOR<idx> : <rom>
+    if (/^#\s*SENSOR\b/i.test(line)) {
+      const colon = line.indexOf(':');
+      const left = colon >= 0 ? line.slice(0, colon) : line;   // "# SENSOR0"
+      const right = colon >= 0 ? line.slice(colon + 1) : '';   // "<rom>"
+      const idxStr = left.replace(/^#\s*SENSOR/i, '').trim();
+      const idx = Number.parseInt(idxStr, 10);
+      const rom = right.trim();
+
+      if (Number.isFinite(idx) && chart.data.datasets[idx]) {
+        chart.data.datasets[idx].label = `T${idx} (${rom})`;
+      }
+      return;
+    }
+
+    // それ以外（# CMD:..., # READY..., # DS18B20 LOGGER...）は無視
+  } catch (e) {
+    console.warn('parseHeaderLine failed:', raw, e);
   }
-  // それ以外（# CMD:..., # READY..., # DS18B20 LOGGER ...）は無視
 }
 
 function parseDataLine(line) {
