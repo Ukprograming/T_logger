@@ -37,6 +37,7 @@
     <button id="markBtn" disabled>マーカー</button>
     <button id="clearBtn">表示クリア</button>
     <button id="downloadBtn" disabled>CSVダウンロード</button>
+    <button id="scanBtn" disabled>再スキャン (SCAN/HEADER)</button>
   </div>
   <p id="status">未接続</p>
   <canvas id="chart" height="120"></canvas>
@@ -77,14 +78,12 @@ function ensureDatasets(n) {
     });
   }
 }
-
 function trimWindow(windowMs) {
   const cutoff = performance.now() - windowMs;
   chart.data.datasets.forEach(ds => {
     while (ds.data.length && ds.data[0].x < cutoff) ds.data.shift();
   });
 }
-
 function pushSample(tsPerf, temps) {
   ensureDatasets(temps.length);
   temps.forEach((t, i) => {
@@ -111,6 +110,7 @@ const stopBtn = document.getElementById('stopBtn');
 const markBtn = document.getElementById('markBtn');
 const clearBtn = document.getElementById('clearBtn');
 const downloadBtn = document.getElementById('downloadBtn');
+const scanBtn = document.getElementById('scanBtn');
 const resSel = document.getElementById('resSel');
 const periodIn = document.getElementById('periodIn');
 const windowMin = document.getElementById('windowMin');
@@ -119,7 +119,6 @@ function log(s) {
   logEl.textContent += s + '\n';
   logEl.scrollTop = logEl.scrollHeight;
 }
-
 function setUIConnected(yes) {
   connectBtn.disabled = yes;
   disconnectBtn.disabled = !yes;
@@ -127,24 +126,23 @@ function setUIConnected(yes) {
   stopBtn.disabled = !yes;
   markBtn.disabled = !yes;
   downloadBtn.disabled = !yes;
+  scanBtn.disabled = !yes;
 }
 
 // ---- 送信は「TextEncoder + port.writable」方式 ----
 const encoder = new TextEncoder();
-
 async function sendLine(s) {
   if (!writer) return;
-  console.log('TX>', s);            // デバッグ
+  console.log('TX>', s); // デバッグ
   await writer.write(encoder.encode(s + '\n'));
 }
 
 async function connect() {
   try {
     if (!('serial' in navigator)) {
-      alert('このブラウザは Web Serial に未対応です（Chrome/Edge を使用してください）。');
+      alert('このブラウザは Web Serial に未対応です（Chrome/Edge を使用してください。HTTPS 必須）');
       return;
     }
-
     port = await navigator.serial.requestPort();
     await port.open({ baudRate: 115200 });
 
@@ -179,7 +177,7 @@ async function disconnect() {
   try { reader && (await reader.cancel()); } catch {}
   try { writer && writer.releaseLock(); } catch {}
   try { reader && reader.releaseLock(); } catch {}
-  try { port && (await port.close())); } catch {}
+  try { port && (await port.close()); } catch {}   // ← 余分な ) を削除
   setUIConnected(false);
   statusEl.textContent = '未接続';
   log('# Disconnected');
@@ -197,7 +195,6 @@ function parseHeaderLine(line) {
     if (chart.data.datasets[i]) chart.data.datasets[i].label = `T${i} (${rom})`;
   }
 }
-
 function parseDataLine(line) {
   // 例: 12345,25.062,24.812
   const parts = line.split(',');
@@ -217,7 +214,6 @@ function parseDataLine(line) {
   const iso = new Date(Date.now() - (performance.now() - tsPerf)).toISOString();
   csvRows.push([iso, ...temps]);
 }
-
 async function readLoop() {
   while (readLoopActive) {
     const { value, done } = await reader.read();
@@ -236,8 +232,8 @@ async function readLoop() {
 
 // --------- UI handlers ---------
 connectBtn.onclick = connect;
-
 disconnectBtn.onclick = disconnect;
+scanBtn.onclick = async () => { await sendLine('SCAN'); await sendLine('HEADER'); };
 
 startBtn.onclick = async () => {
   await sendLine(`RES ${resSel.value}`);
@@ -247,26 +243,22 @@ startBtn.onclick = async () => {
   statusEl.textContent = '記録中';
   log('# START');
 };
-
 stopBtn.onclick = async () => {
   await sendLine('STOP');
   running = false;
   statusEl.textContent = '停止';
   log('# STOP');
 };
-
 markBtn.onclick = () => {
   const ts = new Date().toISOString();
   log(`# MARK ${ts}`);
 };
-
 clearBtn.onclick = () => {
   chart.data.datasets.forEach(ds => ds.data = []);
   chart.update();
   csvRows = [];
   log('# Cleared');
 };
-
 downloadBtn.onclick = () => {
   const header = ['timestamp_iso'];
   for (let i = 0; i < chart.data.datasets.length; i++) header.push(`T${i}_C`);
