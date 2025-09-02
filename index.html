@@ -1,4 +1,4 @@
-<!-- FILE: index.html -->
+<!-- FILE: index.html (T_logger build v7) -->
 <!DOCTYPE html>
 <html lang="ja">
 <head>
@@ -46,6 +46,7 @@
 
 <script>
 'use strict';
+console.log('T_logger build v7');
 
 // --------- Chart.js 準備 ---------
 const ctx = document.getElementById('chart').getContext('2d');
@@ -161,7 +162,6 @@ async function connect() {
     // 初期設定をデバイスへ（必ず sendLine 経由）
     await sendLine(`RES ${resSel.value}`);
     await sendLine(`PERIOD ${periodIn.value}`);
-    // SCAN はヘッダも出すので、まず SCAN、必要なら HEADER も
     await sendLine('SCAN');
     await sendLine('HEADER');
 
@@ -189,22 +189,23 @@ function parseHeaderLine(line) {
   // # SENSORS:<n>
   const mCount = line.match(/^#\s*SENSORS\s*:\s*(\d+)/i);
   if (mCount) {
-    sensorCount = parseInt(mCount[1], 10) || 0;
+    const n = parseInt(mCount[1], 10) || 0;
+    sensorCount = n;
     ensureDatasets(sensorCount);
     chart.update();
     return;
   }
   // # SENSOR<idx>:<rom>
-  const mSensor = line.match(/^#\s*SENSOR(\d+)\s*:\s*(.+)$/i);
+  const mSensor = line.match(/^#\s*SENSOR\s*?(\d+)\s*:\s*(.+)$/i);
   if (mSensor) {
-    const i = parseInt(mSensor[1], 10);
+    const idx = parseInt(mSensor[1], 10);
     const rom = mSensor[2].trim();
-    if (!Number.isNaN(i) && chart.data.datasets[i]) {
-      chart.data.datasets[i].label = `T${i} (${rom})`;
+    if (!Number.isNaN(idx) && chart.data.datasets[idx]) {
+      chart.data.datasets[idx].label = `T${idx} (${rom})`;
     }
     return;
   }
-  // それ以外（# CMD:..., # READY..., # DS18B20 LOGGER... 等）は無視
+  // それ以外（# CMD:..., # READY..., # DS18B20 LOGGER ...）は無視
 }
 
 function parseDataLine(line) {
@@ -237,7 +238,13 @@ async function readLoop() {
       const line = lineBuf.slice(0, idx).replace(/\r$/, '');
       lineBuf = lineBuf.slice(idx + 1);
       if (!line) continue;
-      if (line.startsWith('#')) { parseHeaderLine(line); log(line); continue; }
+
+      if (line.startsWith('#')) {
+        try { parseHeaderLine(line); }
+        catch (e) { console.warn('Header parse error:', line, e); }
+        log(line);
+        continue;
+      }
       parseDataLine(line);
     }
   }
