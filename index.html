@@ -1,4 +1,4 @@
-<!-- FILE: index.html (T_logger build v8) -->
+<!-- FILE: index.html (T_logger build v9) -->
 <!DOCTYPE html>
 <html lang="ja">
 <head>
@@ -46,7 +46,7 @@
 
 <script>
 'use strict';
-console.log('T_logger build v8');
+console.log('T_logger build v9');
 
 // --------- Chart.js 準備 ---------
 const ctx = document.getElementById('chart').getContext('2d');
@@ -88,7 +88,7 @@ function trimWindow(windowMs) {
 function pushSample(tsPerf, temps) {
   ensureDatasets(temps.length);
   temps.forEach((t, i) => {
-    if (t == null) return; // 空欄（無効値）はスキップ
+    if (t == null || !Number.isFinite(t)) return; // 無効値は捨てる
     chart.data.datasets[i].data.push({ x: tsPerf, y: t });
   });
   chart.update('none');
@@ -101,6 +101,11 @@ let sensorCount = 0;
 let startPerfBase = performance.now();
 let csvRows = []; // [timestamp_iso, ...temps]
 let running = false;
+
+// epoch 換算の基準（古いブラウザ対策含む）
+const timeOriginMs = (typeof performance.timeOrigin === 'number')
+  ? performance.timeOrigin
+  : (Date.now() - performance.now());
 
 const statusEl = document.getElementById('status');
 const logEl = document.getElementById('log');
@@ -134,7 +139,7 @@ function setUIConnected(yes) {
 const encoder = new TextEncoder();
 async function sendLine(s) {
   if (!writer) return;
-  console.log('TX>', s); // デバッグ
+  console.log('TX>', s);
   await writer.write(encoder.encode(s + '\n'));
 }
 
@@ -157,9 +162,10 @@ async function connect() {
 
     setUIConnected(true);
     statusEl.textContent = '接続中';
+    statusEl.style.color = '';
     log('# Connected');
 
-    // 初期設定をデバイスへ（必ず sendLine 経由）
+    // 初期設定をデバイスへ
     await sendLine(`RES ${resSel.value}`);
     await sendLine(`PERIOD ${periodIn.value}`);
     await sendLine('SCAN');
@@ -181,13 +187,13 @@ async function disconnect() {
   try { if (port)   await port.close(); } catch {}
   setUIConnected(false);
   statusEl.textContent = '未接続';
+  statusEl.style.color = '';
   log('# Disconnected');
 }
 
-// ---- ヘッダ行の超防御型パーサ（落ちない版） ----
+// ---- ヘッダ行の超防御型パーサ ----
 function parseHeaderLine(raw) {
   try {
-    // BOMや余計な制御文字を除去してから処理
     const line = String(raw).replace(/\uFEFF/g, '').trim();
 
     // # SENSORS : n
@@ -198,14 +204,16 @@ function parseHeaderLine(raw) {
       sensorCount = Number.isFinite(n) ? n : 0;
       ensureDatasets(sensorCount);
       chart.update();
+      statusEl.textContent = (sensorCount > 0) ? `検出センサ: ${sensorCount}` : 'センサ未検出（配線/ピン/抵抗を確認）';
+      statusEl.style.color = (sensorCount > 0) ? '' : 'crimson';
       return;
     }
 
     // # SENSOR<idx> : <rom>
     if (/^#\s*SENSOR\b/i.test(line)) {
       const colon = line.indexOf(':');
-      const left = colon >= 0 ? line.slice(0, colon) : line;   // "# SENSOR0"
-      const right = colon >= 0 ? line.slice(colon + 1) : '';   // "<rom>"
+      const left = colon >= 0 ? line.slice(0, colon) : line;
+      const right = colon >= 0 ? line.slice(colon + 1) : '';
       const idxStr = left.replace(/^#\s*SENSOR/i, '').trim();
       const idx = Number.parseInt(idxStr, 10);
       const rom = right.trim();
@@ -216,30 +224,51 @@ function parseHeaderLine(raw) {
       return;
     }
 
-    // それ以外（# CMD:..., # READY..., # DS18B20 LOGGER...）は無視
+    // その他の # 行は無視
   } catch (e) {
     console.warn('parseHeaderLine failed:', raw, e);
   }
 }
 
+// ---- データ行パーサ（NaN完全防御＋ISO変換安全化）----
 function parseDataLine(line) {
   // 例: 12345,25.062,24.812
   const parts = line.split(',');
   if (parts.length < 2) return;
-  const tsMs = parseInt(parts[0]);
+
+  // timestamp_ms
+  const tsMs = Number.parseInt(parts[0].trim(), 10);
+  if (!Number.isFinite(tsMs)) {
+    console.warn('Invalid timestamp, skip:', parts[0]);
+    return;
+  }
+
+  // 温度群
   const temps = [];
   for (let i = 1; i < parts.length; i++) {
-    const s = parts[i].trim();
-    temps.push(s === '' ? null : parseFloat(s));
+    const sv = parts[i].trim();
+    const v = sv === '' ? NaN : Number.parseFloat(sv);
+    temps.push(Number.isFinite(v) ? v : null);
   }
-  const windowMs = Math.max(1, parseInt(windowMin.value)) * 60_000;
-  const tsPerf = startPerfBase + tsMs;
+
+  // パフォーマンス時間に載せて描画
+  const windowMs = Math.max(1, Number.parseInt(windowMin.value, 10)) * 60_000;
+  const tsPerf = startPerfBase + tsMs; // performance.now() ベースの相対時刻
   pushSample(tsPerf, temps);
   trimWindow(windowMs);
 
-  // CSV 用に ISO 時刻も保存
-  const iso = new Date(Date.now() - (performance.now() - tsPerf)).toISOString();
-  csvRows.push([iso, ...temps]);
+  // CSV 用に ISO（エポックへ安全に変換）
+  const epochMs = timeOriginMs + tsPerf;
+  if (Number.isFinite(epochMs)) {
+    try {
+      const iso = new Date(epochMs).toISOString();
+      csvRows.push([iso, ...temps]);
+    } catch (e) {
+      console.warn('ISO conversion failed for', epochMs, e);
+    }
+  } else {
+    console.warn('epochMs is not finite, skip CSV');
+  }
 }
 
 async function readLoop() {
@@ -275,12 +304,14 @@ startBtn.onclick = async () => {
   await sendLine('START');
   running = true;
   statusEl.textContent = '記録中';
+  statusEl.style.color = '';
   log('# START');
 };
 stopBtn.onclick = async () => {
   await sendLine('STOP');
   running = false;
   statusEl.textContent = '停止';
+  statusEl.style.color = '';
   log('# STOP');
 };
 markBtn.onclick = () => {
