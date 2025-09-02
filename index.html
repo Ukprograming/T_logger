@@ -1,4 +1,4 @@
-<!-- FILE: ds18b20_webserial_logger.html -->
+<!-- FILE: index.html -->
 <!DOCTYPE html>
 <html lang="ja">
 <head>
@@ -59,7 +59,7 @@ const chart = new Chart(ctx, {
     interaction: { mode: 'nearest', intersect: false },
     plugins: { legend: { display: true, position: 'bottom' } },
     scales: {
-      x: { type: 'linear', display: false }, // 実秒は使わず自前で labels を維持
+      x: { type: 'linear', display: false }, // 自前で時刻を持つ
       y: { title: { display: true, text: 'Temperature (°C)' } }
     }
   }
@@ -129,26 +129,38 @@ function setUIConnected(yes) {
   downloadBtn.disabled = !yes;
 }
 
+// ---- 送信は「TextEncoder + port.writable」方式 ----
+const encoder = new TextEncoder();
+
 async function sendLine(s) {
   if (!writer) return;
-  await writer.write(s + '\n');  // 文字列のまま渡す
+  console.log('TX>', s);            // デバッグ
+  await writer.write(encoder.encode(s + '\n'));
 }
 
 async function connect() {
   try {
+    if (!('serial' in navigator)) {
+      alert('このブラウザは Web Serial に未対応です（Chrome/Edge を使用してください）。');
+      return;
+    }
+
     port = await navigator.serial.requestPort();
     await port.open({ baudRate: 115200 });
+
+    // 受信側：TextDecoderStreamで文字列に
     const textDecoder = new TextDecoderStream();
-    const textEncoder = new TextEncoderStream();
-    const readableClosed = port.readable.pipeTo(textDecoder.writable);
-    const writableClosed = textEncoder.readable.pipeTo(port.writable);
+    port.readable.pipeTo(textDecoder.writable);
     reader = textDecoder.readable.getReader();
-    writer = textEncoder.writable.getWriter();
+
+    // 送信側：生の writable にバイト列を書き込む
+    writer = port.writable.getWriter();
+
     setUIConnected(true);
     statusEl.textContent = '接続中';
     log('# Connected');
 
-    // 初期設定をデバイスへ
+    // 初期設定をデバイスへ（必ず sendLine 経由）
     await sendLine(`RES ${resSel.value}`);
     await sendLine(`PERIOD ${periodIn.value}`);
     await sendLine('HEADER');
@@ -167,7 +179,7 @@ async function disconnect() {
   try { reader && (await reader.cancel()); } catch {}
   try { writer && writer.releaseLock(); } catch {}
   try { reader && reader.releaseLock(); } catch {}
-  try { port && (await port.close()); } catch {}
+  try { port && (await port.close())); } catch {}
   setUIConnected(false);
   statusEl.textContent = '未接続';
   log('# Disconnected');
@@ -269,8 +281,7 @@ downloadBtn.onclick = () => {
 };
 
 // ページ離脱時は安全に切断
-window.addEventListener('beforeunload', async (e) => { try { await disconnect(); } catch {} });
+window.addEventListener('beforeunload', async () => { try { await disconnect(); } catch {} });
 </script>
 </body>
 </html>
-
