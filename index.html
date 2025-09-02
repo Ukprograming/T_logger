@@ -1,0 +1,275 @@
+<!-- FILE: ds18b20_webserial_logger.html -->
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>DS18B20 温度ロガー (Web Serial)</title>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <style>
+    body { font-family: system-ui, sans-serif; margin: 16px; }
+    .row { display:flex; flex-wrap: wrap; gap:8px; align-items: center; }
+    label { margin-right: 8px; }
+    #log { white-space: pre; max-height: 200px; overflow:auto; background:#f7f7f7; padding:8px; border:1px solid #ddd; }
+    button { padding:6px 12px; }
+    input, select { padding:4px 6px; }
+  </style>
+</head>
+<body>
+  <h1>DS18B20 温度ロガー (Web Serial)</h1>
+  <div class="row">
+    <button id="connectBtn">ポート接続</button>
+    <button id="disconnectBtn" disabled>切断</button>
+    <label>分解能：
+      <select id="resSel">
+        <option value="12" selected>12-bit (～0.0625℃ / 750ms)</option>
+        <option value="11">11-bit (～0.125℃ / 375ms)</option>
+        <option value="10">10-bit (～0.25℃ / 188ms)</option>
+        <option value="9">9-bit (～0.5℃ / 94ms)</option>
+      </select>
+    </label>
+    <label>周期(ms)：<input type="number" id="periodIn" value="1000" min="50" step="50"></label>
+    <label>表示ウィンドウ(分)：<input type="number" id="windowMin" value="10" min="1" step="1"></label>
+  </div>
+  <div class="row" style="margin-top:8px;">
+    <button id="startBtn" disabled>記録開始</button>
+    <button id="stopBtn" disabled>停止</button>
+    <button id="markBtn" disabled>マーカー</button>
+    <button id="clearBtn">表示クリア</button>
+    <button id="downloadBtn" disabled>CSVダウンロード</button>
+  </div>
+  <p id="status">未接続</p>
+  <canvas id="chart" height="120"></canvas>
+  <h3>受信ログ</h3>
+  <div id="log"></div>
+
+<script>
+'use strict';
+
+// --------- Chart.js 準備 ---------
+const ctx = document.getElementById('chart').getContext('2d');
+const chart = new Chart(ctx, {
+  type: 'line',
+  data: { labels: [], datasets: [] },
+  options: {
+    animation: false,
+    parsing: false,
+    normalized: true,
+    spanGaps: true,
+    interaction: { mode: 'nearest', intersect: false },
+    plugins: { legend: { display: true, position: 'bottom' } },
+    scales: {
+      x: { type: 'linear', display: false }, // 実秒は使わず自前で labels を維持
+      y: { title: { display: true, text: 'Temperature (°C)' } }
+    }
+  }
+});
+
+// Chart.js の更新ヘルパ
+function ensureDatasets(n) {
+  while (chart.data.datasets.length < n) {
+    chart.data.datasets.push({
+      label: `T${chart.data.datasets.length}`,
+      data: [],
+      fill: false,
+      borderWidth: 1,
+      pointRadius: 0
+    });
+  }
+}
+
+function trimWindow(windowMs) {
+  const cutoff = performance.now() - windowMs;
+  chart.data.datasets.forEach(ds => {
+    while (ds.data.length && ds.data[0].x < cutoff) ds.data.shift();
+  });
+}
+
+function pushSample(tsPerf, temps) {
+  ensureDatasets(temps.length);
+  temps.forEach((t, i) => {
+    if (t == null) return; // 空欄（無効値）はスキップ
+    chart.data.datasets[i].data.push({ x: tsPerf, y: t });
+  });
+  chart.update('none');
+}
+
+// --------- Web Serial ---------
+let port, reader, writer, readLoopActive = false;
+let lineBuf = '';
+let sensorCount = 0;
+let startPerfBase = performance.now();
+let csvRows = []; // [timestamp_iso, ...temps]
+let running = false;
+
+const statusEl = document.getElementById('status');
+const logEl = document.getElementById('log');
+const connectBtn = document.getElementById('connectBtn');
+const disconnectBtn = document.getElementById('disconnectBtn');
+const startBtn = document.getElementById('startBtn');
+const stopBtn = document.getElementById('stopBtn');
+const markBtn = document.getElementById('markBtn');
+const clearBtn = document.getElementById('clearBtn');
+const downloadBtn = document.getElementById('downloadBtn');
+const resSel = document.getElementById('resSel');
+const periodIn = document.getElementById('periodIn');
+const windowMin = document.getElementById('windowMin');
+
+function log(s) {
+  logEl.textContent += s + '\n';
+  logEl.scrollTop = logEl.scrollHeight;
+}
+
+function setUIConnected(yes) {
+  connectBtn.disabled = yes;
+  disconnectBtn.disabled = !yes;
+  startBtn.disabled = !yes;
+  stopBtn.disabled = !yes;
+  markBtn.disabled = !yes;
+  downloadBtn.disabled = !yes;
+}
+
+async function sendLine(s) {
+  if (!writer) return;
+  await writer.write(new TextEncoder().encode(s + '\n'));
+}
+
+async function connect() {
+  try {
+    port = await navigator.serial.requestPort();
+    await port.open({ baudRate: 115200 });
+    const textDecoder = new TextDecoderStream();
+    const textEncoder = new TextEncoderStream();
+    const readableClosed = port.readable.pipeTo(textDecoder.writable);
+    const writableClosed = textEncoder.readable.pipeTo(port.writable);
+    reader = textDecoder.readable.getReader();
+    writer = textEncoder.writable.getWriter();
+    setUIConnected(true);
+    statusEl.textContent = '接続中';
+    log('# Connected');
+
+    // 初期設定をデバイスへ
+    await sendLine(`RES ${resSel.value}`);
+    await sendLine(`PERIOD ${periodIn.value}`);
+    await sendLine('HEADER');
+    await sendLine('SCAN');
+
+    readLoopActive = true;
+    readLoop();
+  } catch (e) {
+    console.error(e);
+    alert('接続に失敗: ' + e);
+  }
+}
+
+async function disconnect() {
+  readLoopActive = false;
+  try { reader && (await reader.cancel()); } catch {}
+  try { writer && writer.releaseLock(); } catch {}
+  try { reader && reader.releaseLock(); } catch {}
+  try { port && (await port.close()); } catch {}
+  setUIConnected(false);
+  statusEl.textContent = '未接続';
+  log('# Disconnected');
+}
+
+function parseHeaderLine(line) {
+  if (line.startsWith('# SENSORS:')) {
+    sensorCount = parseInt(line.split(':')[1]) || 0;
+    ensureDatasets(sensorCount);
+    chart.update();
+  }
+  if (line.startsWith('# SENSOR')) {
+    const i = parseInt(line.split(':')[0].match(/SENSOR(\d+)/)[1]);
+    const rom = line.split(':')[1].trim();
+    if (chart.data.datasets[i]) chart.data.datasets[i].label = `T${i} (${rom})`;
+  }
+}
+
+function parseDataLine(line) {
+  // 例: 12345,25.062,24.812
+  const parts = line.split(',');
+  if (parts.length < 2) return;
+  const tsMs = parseInt(parts[0]);
+  const temps = [];
+  for (let i = 1; i < parts.length; i++) {
+    const s = parts[i].trim();
+    temps.push(s === '' ? null : parseFloat(s));
+  }
+  const windowMs = Math.max(1, parseInt(windowMin.value)) * 60_000;
+  const tsPerf = startPerfBase + tsMs;
+  pushSample(tsPerf, temps);
+  trimWindow(windowMs);
+
+  // CSV 用に ISO 時刻も保存
+  const iso = new Date(Date.now() - (performance.now() - tsPerf)).toISOString();
+  csvRows.push([iso, ...temps]);
+}
+
+async function readLoop() {
+  while (readLoopActive) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    lineBuf += value;
+    let idx;
+    while ((idx = lineBuf.indexOf('\n')) >= 0) {
+      const line = lineBuf.slice(0, idx).replace(/\r$/, '');
+      lineBuf = lineBuf.slice(idx + 1);
+      if (!line) continue;
+      if (line.startsWith('#')) { parseHeaderLine(line); log(line); continue; }
+      parseDataLine(line);
+    }
+  }
+}
+
+// --------- UI handlers ---------
+connectBtn.onclick = connect;
+
+disconnectBtn.onclick = disconnect;
+
+startBtn.onclick = async () => {
+  await sendLine(`RES ${resSel.value}`);
+  await sendLine(`PERIOD ${periodIn.value}`);
+  await sendLine('START');
+  running = true;
+  statusEl.textContent = '記録中';
+  log('# START');
+};
+
+stopBtn.onclick = async () => {
+  await sendLine('STOP');
+  running = false;
+  statusEl.textContent = '停止';
+  log('# STOP');
+};
+
+markBtn.onclick = () => {
+  const ts = new Date().toISOString();
+  log(`# MARK ${ts}`);
+};
+
+clearBtn.onclick = () => {
+  chart.data.datasets.forEach(ds => ds.data = []);
+  chart.update();
+  csvRows = [];
+  log('# Cleared');
+};
+
+downloadBtn.onclick = () => {
+  const header = ['timestamp_iso'];
+  for (let i = 0; i < chart.data.datasets.length; i++) header.push(`T${i}_C`);
+  const lines = [header.join(',')];
+  for (const row of csvRows) lines.push(row.join(','));
+  const blob = new Blob(["\uFEFF" + lines.join('\n')], { type: 'text/csv' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = `ds18b20_log_${new Date().toISOString().replace(/[:.]/g,'-')}.csv`;
+  a.click();
+  URL.revokeObjectURL(url);
+};
+
+// ページ離脱時は安全に切断
+window.addEventListener('beforeunload', async (e) => { try { await disconnect(); } catch {} });
+</script>
+</body>
+</html>
