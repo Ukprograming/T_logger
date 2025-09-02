@@ -131,7 +131,7 @@ function setUIConnected(yes) {
 
 async function sendLine(s) {
   if (!writer) return;
-  await writer.write(new TextEncoder().encode(s + '\n'));
+  await writer.write(s + '\n');  // 文字列のまま渡す
 }
 
 async function connect() {
@@ -273,3 +273,4 @@ window.addEventListener('beforeunload', async (e) => { try { await disconnect();
 </script>
 </body>
 </html>
+
