@@ -161,8 +161,9 @@ async function connect() {
     // 初期設定をデバイスへ（必ず sendLine 経由）
     await sendLine(`RES ${resSel.value}`);
     await sendLine(`PERIOD ${periodIn.value}`);
-    await sendLine('HEADER');
+    // SCAN はヘッダも出すので、まず SCAN、必要なら HEADER も
     await sendLine('SCAN');
+    await sendLine('HEADER');
 
     readLoopActive = true;
     readLoop();
@@ -177,24 +178,35 @@ async function disconnect() {
   try { if (reader) await reader.cancel(); } catch {}
   try { if (writer) writer.releaseLock(); } catch {}
   try { if (reader) reader.releaseLock(); } catch {}
-  try { if (port)   await port.close(); } catch {}  // ← ここを修正（余分な ) を削除）
+  try { if (port)   await port.close(); } catch {}
   setUIConnected(false);
   statusEl.textContent = '未接続';
   log('# Disconnected');
 }
 
+// ---- ヘッダ行の堅牢パーサ ----
 function parseHeaderLine(line) {
-  if (line.startsWith('# SENSORS:')) {
-    sensorCount = parseInt(line.split(':')[1]) || 0;
+  // # SENSORS:<n>
+  const mCount = line.match(/^#\s*SENSORS\s*:\s*(\d+)/i);
+  if (mCount) {
+    sensorCount = parseInt(mCount[1], 10) || 0;
     ensureDatasets(sensorCount);
     chart.update();
+    return;
   }
-  if (line.startsWith('# SENSOR')) {
-    const i = parseInt(line.split(':')[0].match(/SENSOR(\d+)/)[1]);
-    const rom = line.split(':')[1].trim();
-    if (chart.data.datasets[i]) chart.data.datasets[i].label = `T${i} (${rom})`;
+  // # SENSOR<idx>:<rom>
+  const mSensor = line.match(/^#\s*SENSOR(\d+)\s*:\s*(.+)$/i);
+  if (mSensor) {
+    const i = parseInt(mSensor[1], 10);
+    const rom = mSensor[2].trim();
+    if (!Number.isNaN(i) && chart.data.datasets[i]) {
+      chart.data.datasets[i].label = `T${i} (${rom})`;
+    }
+    return;
   }
+  // それ以外（# CMD:..., # READY..., # DS18B20 LOGGER... 等）は無視
 }
+
 function parseDataLine(line) {
   // 例: 12345,25.062,24.812
   const parts = line.split(',');
@@ -214,6 +226,7 @@ function parseDataLine(line) {
   const iso = new Date(Date.now() - (performance.now() - tsPerf)).toISOString();
   csvRows.push([iso, ...temps]);
 }
+
 async function readLoop() {
   while (readLoopActive) {
     const { value, done } = await reader.read();
