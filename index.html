@@ -174,10 +174,10 @@ async function connect() {
 
 async function disconnect() {
   readLoopActive = false;
-  try { reader && (await reader.cancel()); } catch {}
-  try { writer && writer.releaseLock(); } catch {}
-  try { reader && reader.releaseLock(); } catch {}
-  try { port && (await port.close()); } catch {}   // ← 余分な ) を削除
+  try { if (reader) await reader.cancel(); } catch {}
+  try { if (writer) writer.releaseLock(); } catch {}
+  try { if (reader) reader.releaseLock(); } catch {}
+  try { if (port)   await port.close(); } catch {}  // ← ここを修正（余分な ) を削除）
   setUIConnected(false);
   statusEl.textContent = '未接続';
   log('# Disconnected');
